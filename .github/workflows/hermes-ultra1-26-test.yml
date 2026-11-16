@@ -51,6 +51,7 @@ jobs:
           echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
           "$XCODE/Contents/Developer/usr/bin/xcodebuild" -version
 
+      # Avoid global -sdk: it overrides SDKROOT=watchos on the embedded target.
       - name: Compile iPhone host and embedded watchOS companion (unsigned)
         shell: bash
         run: |
@@ -60,7 +61,6 @@ jobs:
             -project HermesEnabler2.xcodeproj \
             -scheme HermesCompanion \
             -configuration Release \
-            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/HermesDerivedData" \
             CODE_SIGNING_ALLOWED=NO \
