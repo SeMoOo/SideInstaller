@@ -33,6 +33,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "c0ae1666cba67ab7fbae6d3e481cc2731f5550a1"
           echo "Pinned upstream 1.6.2 SHA verified."
 
+      # Retry after correcting the watchOS Swift diagnostics logger.
       - name: Apply validated read-first and logging patch
         shell: bash
         run: |
