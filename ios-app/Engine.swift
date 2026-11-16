@@ -2027,6 +2027,10 @@ final class Engine {
         // the provisioning profile with error 8220.
         let udid = deviceUDID ?? ""
         let name = deviceName ?? ""
+        let watchUDID = (try? await onDeviceQueue {
+            try self.connection.pairedWatchUDID()
+        }) ?? ""
+        if !watchUDID.isEmpty { log("Paired Apple Watch found for watchOS provisioning.") }
         if udid.isEmpty {
             log("⚠️ No device UDID captured — run the Connect step first, or signing may fail with error 8220.")
         }
@@ -2039,7 +2043,7 @@ final class Engine {
         do {
             let path = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipa, udid: udid, deviceName: name,
-                                     pairingFilePath: pairingPath,
+                                     watchUDID: watchUDID, pairingFilePath: pairingPath,
                                      forMadeira: source == .madeira || Self.isMadeira(ipaPath: ipa))
             }
             signedAppPath = path
@@ -2081,7 +2085,7 @@ final class Engine {
     /// its App ID again when it runs out; it can restore the first on a new App
     /// ID, not the second.
     private func performSign(session: OpaquePointer, ipa: String, udid: String, deviceName: String,
-                             pairingFilePath: String, forMadeira: Bool) throws -> String {
+                             watchUDID: String, pairingFilePath: String, forMadeira: Bool) throws -> String {
         log("Signing \(ipa) …")
         if forMadeira {
             log("Signing for Madeira: Increased Memory Limit on its App ID (it shows as Memory+), and no app group.")
@@ -2089,7 +2093,7 @@ final class Engine {
         var signed: UnsafeMutablePointer<CChar>?
         var error: UnsafeMutablePointer<CChar>?
         // Memory limit: 1 = required, 2 = where it's safe (see sideinstaller.h).
-        let rc = si_sign_ipa(session, ipa, udid, deviceName, pairingFilePath,
+        let rc = si_sign_ipa(session, ipa, udid, deviceName, watchUDID, pairingFilePath,
                              forMadeira ? 1 : 2, forMadeira ? 0 : 1, &signed, &error)
         if rc == 0 {
             let path = signed.map { String(cString: $0) } ?? ""
@@ -3558,13 +3562,16 @@ final class Engine {
         guard let session = signSession else { throw EngineError.message(L("Not signed in.")) }
         let udid = deviceUDID ?? ""
         let device = deviceName ?? ""
+        let watchUDID = (try? await onDeviceQueue {
+            try self.connection.pairedWatchUDID()
+        }) ?? ""
         log("=== Refreshing \(name) from \((ipaPath as NSString).lastPathComponent) ===")
         let path = pairingFilePath ?? PairingController.pairingFilePath()
         let signed: String
         do {
             signed = try await onSignQueue {
                 try self.performSign(session: session, ipa: ipaPath, udid: udid, deviceName: device,
-                                     pairingFilePath: path,
+                                     watchUDID: watchUDID, pairingFilePath: path,
                                      forMadeira: Self.isMadeira(ipaPath: ipaPath))
             }
         } catch EngineError.certExists {
