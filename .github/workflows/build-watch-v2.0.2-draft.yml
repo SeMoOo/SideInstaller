@@ -38,6 +38,8 @@ jobs:
           grep -q 'BUNDLE_ID="${BUNDLE_ID:-com.frizzlem.sideinstaller}"' scripts/build-ipa.sh
           grep -q 'watch_provisionable_bundles' rust-core/vendor/isideload/src/sideload/bundle.rs
           grep -q 'DeveloperDeviceType::Watchos' rust-core/vendor/isideload/src/sideload/sideloader.rs
+          # Prevent regression: both Swift signing screens must use the ten-argument FFI.
+          grep -Fq 'si_sign_ipa(session, ipa, udid, deviceName, nil, nil, 0, 1, &signed, &error)' ios-app/SideBySideView.swift
           if grep -E 'com\.soooma|HermesEnabler|8N8S3H2FFR' \
               rust-core/vendor/isideload/src/sideload/{bundle,application,sideloader,sign}.rs; then
             echo '::error::Unexpected app-specific values in generalized Watch signer.'
