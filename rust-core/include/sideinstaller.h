@@ -180,6 +180,9 @@ int32_t si_apple_signin(const char *apple_id,
 // signing fails if Apple refuses (Madeira needs it); 2 yes, except for the app
 // stores that refresh themselves (SideStore, LiveContainer+SideStore, AltStore,
 // StikStore), and the app is signed without it if Apple refuses.
+// `watch_udid` is the paired Watch's UDID, or empty if none was discovered.
+// Required only when the IPA embeds a Watch app; signing will register that
+// device with the team and download distinct watchOS profiles.
 // `app_group` is non-zero for every app but one that renews its own profile
 // (Madeira): zero leaves its App IDs without an app group, which an App ID it
 // registers again later wouldn't have either.
@@ -187,6 +190,7 @@ int32_t si_sign_ipa(SignSession *session,
                     const char *ipa_path,
                     const char *udid,
                     const char *device_name,
+                    const char *watch_udid,
                     const char *pairing_file_path,
                     int32_t memory_limit,
                     int32_t app_group,
