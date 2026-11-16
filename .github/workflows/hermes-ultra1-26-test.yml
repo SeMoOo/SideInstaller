@@ -1,0 +1,145 @@
+name: HermesEnabler Ultra 1 watchOS 26.x test IPA (draft only)
+
+on:
+  push:
+    branches:
+      - research/hermes-ultra1-26-test
+    paths:
+      - .github/workflows/hermes-ultra1-26-test.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hermes-ultra1-26-test-v1
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Checkout isolated research branch
+        uses: actions/checkout@v4
+
+      - name: Prepare pinned upstream HermesEnabler 1.6.2
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/pookjw/HermesEnabler.git "$RUNNER_TEMP/HermesEnabler"
+          cd "$RUNNER_TEMP/HermesEnabler"
+          git checkout --detach c0ae1666cba67ab7fbae6d3e481cc2731f5550a1
+          test "$(git rev-parse HEAD)" = "c0ae1666cba67ab7fbae6d3e481cc2731f5550a1"
+          echo "Pinned upstream 1.6.2 SHA verified."
+
+      - name: Apply validated read-first and logging patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/hermes-testing/patch_ultra26.py" "$RUNNER_TEMP/HermesEnabler"
+          grep -Fq 'MG direct read succeeded' "$RUNNER_TEMP/HermesEnabler/HermesEnabler2/BQCore.m"
+          grep -Fq 'transferDiagnosticLog()' "$RUNNER_TEMP/HermesEnabler/HermesEnabler2/WatchConnectivity/WatchConnectivityManager.swift"
+          grep -Fq 'latestDiagnosticLogURL' "$RUNNER_TEMP/HermesEnabler/HermesCompanion/WatchConnectivity/WatchConnectivityManager.swift"
+
+      - name: Select Xcode 27.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE="/Applications/Xcode_27.1.app"
+          test -d "$XCODE" || { echo "::error::Xcode 27.1 unavailable"; exit 1; }
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          "$XCODE/Contents/Developer/usr/bin/xcodebuild" -version
+
+      - name: Compile iPhone host and embedded watchOS companion (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/HermesEnabler"
+          xcodebuild \
+            -project HermesEnabler2.xcodeproj \
+            -scheme HermesCompanion \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/HermesDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            COMPANION_BUNDLE_IDENTIFIER=com.soooma.HermesEnabler \
+            build
+
+      - name: Validate and package IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/HermesDerivedData/Build/Products/Release-iphoneos/HermesCompanion.app"
+          test -d "$APP"
+          find "$APP" -maxdepth 5 -name '*.app' -print
+          python3 - "$APP" <<'PY'
+          import plistlib, pathlib, sys
+          host = pathlib.Path(sys.argv[1])
+          main = plistlib.loads((host / 'Info.plist').read_bytes())
+          assert main['CFBundleIdentifier'] == 'com.soooma.HermesEnabler', main
+          watches = list(host.rglob('Watch/*.app'))
+          if not watches:
+              watches = [p for p in host.rglob('*.app') if p != host]
+          assert watches, 'No embedded watchOS companion in iPhone host'
+          for watch in watches:
+              info = plistlib.loads((watch / 'Info.plist').read_bytes())
+              assert info['CFBundleIdentifier'] == 'com.soooma.HermesEnabler.watchkitapp', info
+              assert (watch / info['CFBundleExecutable']).is_file(), 'Watch executable missing'
+              print('Embedded watchOS bundle:', watch, info['CFBundleIdentifier'])
+          print('iPhone bundle:', main['CFBundleIdentifier'])
+          PY
+          PACKAGE="$RUNNER_TEMP/HermesIPA"
+          mkdir -p "$PACKAGE/Payload" "$RUNNER_TEMP/ipa"
+          ditto "$APP" "$PACKAGE/Payload/HermesCompanion.app"
+          cd "$PACKAGE"
+          ditto -c -k --sequesterRsrc --keepParent Payload "$RUNNER_TEMP/ipa/HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned.ipa"
+          test -s "$RUNNER_TEMP/ipa/HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned.ipa"
+          unzip -t "$RUNNER_TEMP/ipa/HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned.ipa" | tail -1
+
+      - name: Retain unsigned test IPA as Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned
+          path: ${{ runner.temp }}/ipa/HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish separate DRAFT test release only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TAG="hermes-ultra1-26-test-v1"
+          IPA="$RUNNER_TEMP/ipa/HermesEnabler-Ultra1-watchOS26-Test-v1-unsigned.ipa"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Existing test release must not be overwritten."
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/hermes-test-notes.md" <<'NOTES'
+          # HermesEnabler Ultra 1 watchOS 26.6 / 26.6.1 — TEST V1
+
+          **Experimental / unsigned IPA, not verified for native Hermès activation.**
+          Signed for installation by SideInstaller v2.0.2 (203), not by this workflow.
+          No production release or master/main changes are made.
+
+          - Source: original pookjw/HermesEnabler 1.6.2, pinned SHA c0ae1666cba67ab7fbae6d3e481cc2731f5550a1.
+          - Integrated PR #89's read-first MobileGestalt backup and non-writing open() permission probes.
+          - Adds "Send bqtool.log to iPhone" button on Watch / "Export Watch Diagnostic Log" on iPhone.
+          - Keeps the original activation engine, including experimental watchOS 26 behavior; **does not establish a writable sandbox token**.
+          - Unsigned host bundle ID com.soooma.HermesEnabler and embedded watchkitapp. SideInstaller applies your own Apple Developer signing.
+
+          Test: Install via SideInstaller 203, install Watch app, open MG Backups, create initial backup, run Check Direct Write Access, tap Send bqtool.log to iPhone. Then open the phone companion and Export Watch Diagnostic Log. Redact device/account identifiers before sharing it.
+
+          **Do not claim Hermès face activation success until confirmed on physical Ultra 1 / 23U67 and 23U95.**
+          NOTES
+          gh release create "$TAG" "$IPA" --draft \
+            --title "HermesEnabler Ultra 1 watchOS 26 Test V1 (diagnostics; unsigned)" \
+            --notes-file "$RUNNER_TEMP/hermes-test-notes.md" \
+            --target "$GITHUB_SHA"
+          gh release view "$TAG" --json url,isDraft,tagName,name
