@@ -17,6 +17,7 @@ pub struct Bundle {
 
     app_extensions: Vec<Bundle>,
     frameworks: Vec<Bundle>,
+    watch_apps: Vec<Bundle>,
     _libraries: Vec<String>,
 }
 
@@ -54,6 +55,9 @@ impl Bundle {
         app_extensions.extend(child_bundles(&bundle_path, "Extensions", Some("appex"))?);
 
         let frameworks = child_bundles(&bundle_path, "Frameworks", None)?;
+        // A watchOS app is nested under Watch/, not PlugIns/ or Extensions/.
+        // Without this traversal its Info.plist and signature are never updated.
+        let watch_apps = child_bundles(&bundle_path, "Watch", Some("app"))?;
 
         // Find all .dylib files in the bundle directory (recursive)
         let libraries = find_dylibs(&bundle_path, &bundle_path)?;
@@ -63,6 +67,7 @@ impl Bundle {
             bundle_dir: bundle_path,
             app_extensions,
             frameworks,
+            watch_apps,
             _libraries: libraries,
         })
     }
@@ -125,6 +130,69 @@ impl Bundle {
         &mut self.frameworks
     }
 
+    pub fn watch_apps(&self) -> &[Bundle] {
+        &self.watch_apps
+    }
+
+    /// All provisionable Watch app and extension bundles, including nested
+    /// watchOS extensions. iPhone extensions deliberately reuse the iPhone
+    /// profile in this fork, preserving the existing free-team behavior.
+    pub fn watch_provisionable_bundles(&self) -> Vec<&Bundle> {
+        fn descend<'a>(bundle: &'a Bundle, into: &mut Vec<&'a Bundle>) {
+            into.push(bundle);
+            for child in &bundle.app_extensions {
+                descend(child, into);
+            }
+            for child in &bundle.watch_apps {
+                descend(child, into);
+            }
+        }
+        let mut found = Vec::new();
+        for watch in &self.watch_apps {
+            descend(watch, &mut found);
+        }
+        found
+    }
+
+    /// Rebase nested bundle IDs and the Watch's companion reference in lockstep
+    /// with the top-level iPhone application identifier.
+    pub fn rebase_embedded_identifiers(
+        &mut self,
+        old_parent: &str,
+        new_parent: &str,
+    ) -> Result<(), Report> {
+        for extension in &mut self.app_extensions {
+            rebase_child(extension, old_parent, new_parent)?;
+        }
+        for watch in &mut self.watch_apps {
+            if let Some(ref_id) = watch
+                .app_info
+                .get("WKCompanionAppBundleIdentifier")
+                .and_then(Value::as_string)
+            {
+                if ref_id != old_parent && ref_id != new_parent {
+                    bail!(SideloadError::InvalidBundle(format!(
+                        "Watch companion identifier {ref_id} is neither {old_parent} nor {new_parent}"
+                    )));
+                }
+            }
+            watch.app_info.insert(
+                "WKCompanionAppBundleIdentifier".into(),
+                Value::String(new_parent.into()),
+            );
+            rebase_child(watch, old_parent, new_parent)?;
+        }
+        Ok(())
+    }
+
+    pub fn write_info_recursive(&self) -> Result<(), Report> {
+        self.write_info()?;
+        for child in self.app_extensions.iter().chain(&self.frameworks).chain(&self.watch_apps) {
+            child.write_info_recursive()?;
+        }
+        Ok(())
+    }
+
     pub fn write_info(&self) -> Result<(), Report> {
         let info_plist_path = self.bundle_dir.join("Info.plist");
         plist::to_file_binary(&info_plist_path, &self.app_info).context(
@@ -139,6 +207,7 @@ impl Bundle {
             bundle_dir: dylib_path,
             app_extensions: Vec::new(),
             frameworks: Vec::new(),
+            watch_apps: Vec::new(),
             _libraries: Vec::new(),
         }
     }
@@ -160,6 +229,10 @@ impl Bundle {
             bundles.push(bundle.clone());
             bundle.collect_nested_bundles_into(bundles);
         }
+        for bundle in &self.watch_apps {
+            bundles.push(bundle.clone());
+            bundle.collect_nested_bundles_into(bundles);
+        }
     }
 
     pub fn collect_nested_bundles(&self) -> Vec<Bundle> {
@@ -176,6 +249,28 @@ impl Bundle {
         bundles.reverse();
         bundles
     }
+}
+
+fn rebase_child(bundle: &mut Bundle, old_parent: &str, new_parent: &str) -> Result<(), Report> {
+    let id = bundle.bundle_identifier()
+        .ok_or_else(|| report!("Nested bundle missing CFBundleIdentifier"))?
+        .to_string();
+    if let Some(rest) = suffix_under(&id, old_parent) {
+        if rest.is_empty() {
+            bail!(SideloadError::InvalidBundle(format!(
+                "Nested bundle must have a distinct identifier: {id}"
+            )));
+        }
+        // Already-rebased bundles must never have the team suffix inserted twice.
+        if suffix_under(&id, new_parent).is_none() {
+            bundle.set_bundle_identifier(&format!("{new_parent}{rest}"));
+        }
+    } else {
+        bail!(SideloadError::InvalidBundle(format!(
+            "Nested bundle {id} is not under {old_parent}"
+        )));
+    }
+    bundle.rebase_embedded_identifiers(old_parent, new_parent)
 }
 
 /// `identifier` moved from under `old_prefix` to under `new_prefix`, or `None`
@@ -373,6 +468,7 @@ pub(crate) mod tests {
             bundle_dir: PathBuf::new(),
             app_extensions: Vec::new(),
             frameworks: Vec::new(),
+            watch_apps: Vec::new(),
             _libraries: Vec::new(),
         }
     }
@@ -428,6 +524,47 @@ pub(crate) mod tests {
         assert_eq!(
             task_ids(&bundle),
             ["com.example.app.refresh", "com.example.app.TEAMID.refresh"]
+        );
+    }
+
+
+    #[test]
+    fn watch_companion_rebase_follows_iphone_bundle_id() {
+        let dir = TempDir::new();
+        let app_dir = dir.0.join("HermesCompanion.app");
+        write_bundle(&app_dir, "com.soooma.HermesEnabler");
+        let watch_dir = app_dir.join("Watch/HermesEnabler2.app");
+        write_bundle(&watch_dir, "com.soooma.HermesEnabler.watchkitapp");
+        let mut info: Dictionary = plist::from_file(watch_dir.join("Info.plist")).unwrap();
+        info.insert("WKCompanionAppBundleIdentifier".into(), "com.soooma.HermesEnabler".into());
+        plist::to_file_xml(watch_dir.join("Info.plist"), &info).unwrap();
+        write_bundle(
+            &watch_dir.join("PlugIns/WatchExtension.appex"),
+            "com.soooma.HermesEnabler.watchkitapp.watchkitextension",
+        );
+
+        let mut root = Bundle::new(app_dir).unwrap();
+        assert_eq!(root.watch_provisionable_bundles().len(), 2);
+        root.rebase_embedded_identifiers(
+            "com.soooma.HermesEnabler",
+            "com.soooma.HermesEnabler.8N8S3H2FFR",
+        ).unwrap();
+        root.set_bundle_identifier("com.soooma.HermesEnabler.8N8S3H2FFR");
+        root.write_info_recursive().unwrap();
+        let watch = &root.watch_apps()[0];
+        assert_eq!(watch.bundle_identifier(), Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp"));
+        assert_eq!(
+            watch.app_info.get("WKCompanionAppBundleIdentifier").and_then(Value::as_string),
+            Some("com.soooma.HermesEnabler.8N8S3H2FFR")
+        );
+        assert_eq!(
+            watch.app_extensions()[0].bundle_identifier(),
+            Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp.watchkitextension")
+        );
+        let on_disk: Dictionary = plist::from_file(watch.bundle_dir.join("Info.plist")).unwrap();
+        assert_eq!(
+            on_disk.get("WKCompanionAppBundleIdentifier").and_then(Value::as_string),
+            Some("com.soooma.HermesEnabler.8N8S3H2FFR")
         );
     }
 
