@@ -1,0 +1,171 @@
+name: SideInstaller v2.0.2 (203) - Watch App Group test draft
+
+# Build triggered by committing THIS new workflow on the
+# isolated development branch. Publishes nothing automatically.
+on:
+  push:
+    branches:
+      - fix/watch-companion-sideload
+    paths:
+      - .github/workflows/build-watch-v2.0.2-appgroup-draft.yml
+  workflow_dispatch:
+
+concurrency:
+  group: sideinstaller-watch-v2.0.2-appgroup-test
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build, validate, save draft IPA
+    if: github.ref == 'refs/heads/fix/watch-companion-sideload'
+    runs-on: xcode-27
+    timeout-minutes: 90
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v4
+
+      - name: Preflight source and identity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sed -n 's/^[[:space:]]*MARKETING_VERSION: "\(.*\)"/\1/p' project.yml | head -1)" = "2.0.2"
+          test "$(sed -n 's/^[[:space:]]*CURRENT_PROJECT_VERSION: "\(.*\)"/\1/p' project.yml | head -1)" = "203"
+          grep -q 'PRODUCT_BUNDLE_IDENTIFIER: com.frizzlem.sideinstaller$' project.yml
+          grep -q 'PRODUCT_BUNDLE_IDENTIFIER: com.frizzlem.sideinstaller.LiveActivity$' project.yml
+          grep -q 'BUNDLE_ID="${BUNDLE_ID:-com.frizzlem.sideinstaller}"' scripts/build-ipa.sh
+          grep -q 'watch_provisionable_bundles' rust-core/vendor/isideload/src/sideload/bundle.rs
+          grep -q 'DeveloperDeviceType::Watchos' rust-core/vendor/isideload/src/sideload/sideloader.rs
+          grep -q 'app_id.ensure_group_feature(&mut session, team, platform.clone())' rust-core/vendor/isideload/src/sideload/sideloader.rs
+          grep -q 'verify_app_group_in_profile(parsed.entitlements(), group)' rust-core/vendor/isideload/src/sideload/sign.rs
+          grep -q 'apply_platform_to_body(&mut body, &device_type)' rust-core/vendor/isideload/src/dev/app_groups.rs
+          # Prevent regression: both Swift signing screens must use the ten-argument FFI.
+          grep -Fq 'si_sign_ipa(session, ipa, udid, deviceName, nil, nil, 0, 1, &signed, &error)' ios-app/SideBySideView.swift
+          if grep -E 'com\.soooma|HermesEnabler|8N8S3H2FFR' \
+              rust-core/vendor/isideload/src/sideload/{bundle,application,sideloader,sign}.rs; then
+            echo '::error::Unexpected app-specific values in generalized Watch signer.'
+            exit 1
+          fi
+          echo "Source identity and generalized Watch checks passed."
+
+      - name: Select Xcode 27.1
+        shell: bash
+        run: |
+          set -euo pipefail
+          XCODE="/Applications/Xcode_27.1.app"
+          test -d "$XCODE" || { echo "::error::Xcode 27.1 not found"; exit 1; }
+          echo "DEVELOPER_DIR=$XCODE/Contents/Developer" >> "$GITHUB_ENV"
+          "$XCODE/Contents/Developer/usr/bin/xcodebuild" -version
+
+      - name: Configure build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v xcodegen >/dev/null || brew install xcodegen
+          rustup target add aarch64-apple-ios
+          rustc --version
+          xcodegen --version
+          test "$(uname -m)" = "arm64"
+
+      - name: Restore cargo build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust-core/target
+          key: sideinstaller-v2.0.2-ios-${{ hashFiles('rust-core/Cargo.lock', 'rust-core/**/*.rs') }}
+          restore-keys: |
+            sideinstaller-v2.0.2-ios-
+
+      - name: Build IPA with modified Rust signer
+        shell: bash
+        env:
+          VERSION: "2.0.2"
+          BUILD_NUMBER: "203"
+          BUNDLE_ID: "com.frizzlem.sideinstaller"
+          OUTPUT: ${{ runner.temp }}/ipa/SideInstaller-v2.0.2-appgroup-b203.ipa
+          DERIVED_DATA: ${{ runner.temp }}/DerivedData
+          REBUILD_RUST: "1"
+          MIN_IOS_SDK: "27.1"
+        run: |
+          set -euo pipefail
+          bash scripts/build-ipa.sh
+          test -s "$OUTPUT"
+
+      - name: Verify packaged IPA and v2.0.1 bundle identity
+        shell: bash
+        env:
+          IPA: ${{ runner.temp }}/ipa/SideInstaller-v2.0.2-appgroup-b203.ipa
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, zipfile, plistlib, hashlib
+          ipa=os.environ["IPA"]
+          expected="com.frizzlem.sideinstaller"
+          base="Payload/SideInstaller.app/"
+          with zipfile.ZipFile(ipa) as z:
+              damaged=z.testzip()
+              assert damaged is None, f"ZIP integrity failure: {damaged}"
+              names=set(z.namelist())
+              assert base+"SideInstaller" in names, "iOS executable missing"
+              main=plistlib.loads(z.read(base+"Info.plist"))
+              assert main["CFBundleIdentifier"]==expected, main["CFBundleIdentifier"]
+              assert main["CFBundleShortVersionString"]=="2.0.2", main["CFBundleShortVersionString"]
+              assert str(main["CFBundleVersion"])=="203", main["CFBundleVersion"]
+              ext_name=base+"PlugIns/SideInstallerLiveActivity.appex/Info.plist"
+              assert ext_name in names, "Live Activity extension missing"
+              ext=plistlib.loads(z.read(ext_name))
+              assert ext["CFBundleIdentifier"]==expected+".LiveActivity", ext["CFBundleIdentifier"]
+              assert ext["CFBundleShortVersionString"]=="2.0.2"
+              schemes=[s for value in main.get("CFBundleURLTypes",[]) for s in value.get("CFBundleURLSchemes",[])]
+              assert "sideinstaller" in schemes, "Existing URL scheme lost"
+              assert not any("embedded.mobileprovision" in x for x in names), "Unexpected embedded signing profile in unsigned IPA"
+          sha=hashlib.sha256(open(ipa,"rb").read()).hexdigest()
+          print(f"IPA validated: {ipa} | SHA256={sha} | BundleID={expected} | Version=2.0.2(202)")
+          PY
+
+      - name: Retain build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideInstaller-v2.0.2-appgroup-b203-unsigned
+          path: ${{ runner.temp }}/ipa/SideInstaller-v2.0.2-appgroup-b203.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create DRAFT release only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          IPA: ${{ runner.temp }}/ipa/SideInstaller-v2.0.2-appgroup-b203.ipa
+        run: |
+          set -euo pipefail
+          if gh release view "v2.0.2-appgroup-rc1" >/dev/null 2>&1; then
+            echo "::error::Release v2.0.2 already exists. Will not overwrite it."
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/draft-release-notes.md" <<'NOTES'
+          ## SideInstaller v2.0.2 build 203 - App Group-enabled Watch signing (TEST DRAFT)
+
+          - Generalized iPhone and embedded Watch app bundle ID rebasing.
+          - WatchKit extension references follow the actual containing Watch app.
+          - Registers a paired Watch for watchOS development signing and obtains separate profiles.
+          - Recursively signs embedded Watch apps and WatchKit extensions.
+          - Maintains v2.0.1 installed SideInstaller bundle ID: com.frizzlem.sideinstaller.
+          - Updated watchOS App Group capability assignment with per-profile validation.
+          - Distinct build number 203; existing build 202 draft release remains untouched.
+          - Unsigned IPA, requiring signing by the device owner.
+
+          **Status:** Draft test, not published. Existing build 202 draft preserved as fallback. Watch app installation worked with build 202; App Group assignment and runtime compatibility of build 203 still require testing on-device.
+          **Source:** fix/watch-companion-sideload
+          NOTES
+          gh release create "v2.0.2-appgroup-rc1" "$IPA" \
+            --draft --target "$GITHUB_SHA" \
+            --title "SideInstaller v2.0.2 (203) App Group test draft" \
+            --notes-file "$RUNNER_TEMP/draft-release-notes.md"
+          gh release view "v2.0.2-appgroup-rc1" --json url,isDraft,tagName,name
+          echo "Draft v2.0.2 created from $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
