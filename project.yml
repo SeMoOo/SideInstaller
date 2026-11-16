@@ -37,7 +37,7 @@ targets:
       - target: SideInstallerLiveActivity
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller
+        PRODUCT_BUNDLE_IDENTIFIER: com.frizzlem.sideinstaller
         INFOPLIST_FILE: ios-app/Info.plist
         # idevice's static lib pulls in C++ symbols (aws-lc); link libc++.
         OTHER_LDFLAGS: "-lc++"
@@ -60,7 +60,7 @@ targets:
       - target: SideInstaller
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.frizzlem.sideinstaller.tests
         GENERATE_INFOPLIST_FILE: YES
 
   # Draws the pairing Live Activity: the code Settings asks for, in the Dynamic
@@ -79,7 +79,7 @@ targets:
       base:
         # Has to stay the app's identifier plus a suffix, or iOS refuses to
         # install the app. Change both together.
-        PRODUCT_BUNDLE_IDENTIFIER: com.frizzle.sideinstaller.LiveActivity
+        PRODUCT_BUNDLE_IDENTIFIER: com.frizzlem.sideinstaller.LiveActivity
         INFOPLIST_FILE: ios-live-activity/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SKIP_INSTALL: YES
