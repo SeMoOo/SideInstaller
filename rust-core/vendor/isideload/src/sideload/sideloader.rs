@@ -240,8 +240,9 @@ impl Sideloader {
                     )
                 })?;
 
-            // Watch App IDs need watchOS profiles. Their capabilities are
-            // configured separately from the iPhone's memory-limit feature.
+            // Watch App IDs require a separate watchOS profile and the same
+            // App Group entitlement as their host when App Groups are enabled.
+            // Increased Memory Limit remains iPhone-only.
             let watch_app_ids: Vec<_> = app_ids.iter()
                 .filter(|id| watch_bundle_ids.contains(&id.identifier))
                 .cloned().collect();
@@ -250,11 +251,13 @@ impl Sideloader {
                 let (team, app_group) = (&team, &app_group);
                 let is_watch = watch_bundle_ids.contains(&app_id.identifier);
                 async move {
-                    if !is_watch && let Some(app_group) = app_group {
-                        app_id.ensure_group_feature(&mut session, team).await?;
+                    if let Some(app_group) = app_group {
+                        let platform = is_watch.then_some(DeveloperDeviceType::Watchos);
+                        app_id.ensure_group_feature(&mut session, team, platform.clone()).await?;
                         session
-                            .assign_app_group(team, app_group, app_id, None)
-                            .await?;
+                            .assign_app_group(team, app_group, app_id, platform)
+                            .await
+                            .context(format!("Failed to assign App Group to {}", app_id.identifier))?;
                     }
                     if !is_watch && memory_limit != MemoryLimit::Off {
                         match session.add_increased_memory_limit(team, app_id).await {
@@ -274,10 +277,12 @@ impl Sideloader {
             .await?;
 
             info!("App IDs configured");
-            Ok::<_, Report>((app, special, group_identifier, main_app_id, watch_app_ids))
+            let watch_group_required = app_group.as_ref()
+                .map(|_| group_identifier.clone());
+            Ok::<_, Report>((app, special, group_identifier, main_app_id, watch_app_ids, watch_group_required))
         };
 
-        let ((), cert_identity, (mut app, special, group_identifier, main_app_id, watch_app_ids)) =
+        let ((), cert_identity, (mut app, special, group_identifier, main_app_id, watch_app_ids, watch_group_required)) =
             try_join3(registration, certificate, bundle).await?;
 
         // The profile has to come after the device and App IDs are set up; the
@@ -329,6 +334,7 @@ impl Sideloader {
             &special,
             &team,
             &watch_profiles,
+            watch_group_required.as_deref(),
         )
         .context("Failed to sign app")?;
 
