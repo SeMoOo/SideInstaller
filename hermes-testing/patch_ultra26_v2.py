@@ -145,8 +145,7 @@ NSString *BQProbeWatch26WritePaths(void) {
         gUltra26NormalCandidateFailed = NO;
     }
     NSString *answer = [NSString stringWithFormat:
-        @"Exact-file MCM tests: %lu\nTokens acquired: %lu\nWritable tokens: %lu\n"
-         "MG write permission: %@\n(Protected file was NOT modified.)",
+        @"Exact-file MCM tests: %lu\nTokens acquired: %lu\nWritable tokens: %lu\nMG write permission: %@\n(Protected file was NOT modified.)",
         (unsigned long)gUltra26LastTrials,
         (unsigned long)gUltra26LastTokens,
         (unsigned long)gUltra26LastWritable,
@@ -236,5 +235,82 @@ change(view,
                     writeAccessResult = BQProbeGestaltWriteAccess()
                 }""",
 "add on-watch original exact-file token/writability probe")
+
+
+# An exact-file extension, if one ever becomes writable, should not trigger
+# the upstream truncate-then-rewrite fallback on a protected system plist.
+# For only 26.6/26.6.1, require verified same-length content and use pwrite,
+# full readback and best-effort rollback on failure; never truncate/rename.
+change(m,
+"""static BOOL bq_write_data(NSString *path, NSData *data, NSString **err) {
+    NSData *original = [NSData dataWithContentsOfFile:path];
+    if (BQInPlaceWrite()) {""",
+"""static BOOL bq_write_exact(int fd, const void *buffer, size_t length) {
+    const uint8_t *bytes = (const uint8_t *)buffer;
+    size_t done = 0;
+    while (done < length) {
+        ssize_t n = pwrite(fd, bytes + done, length - done, (off_t)done);
+        if (n <= 0) return NO;
+        done += (size_t)n;
+    }
+    return YES;
+}
+
+static NSData *bq_read_exact(int fd, size_t length) {
+    NSMutableData *buffer = [NSMutableData dataWithLength:length];
+    uint8_t *dst = buffer.mutableBytes;
+    size_t done = 0;
+    while (done < length) {
+        ssize_t n = pread(fd, dst + done, length - done, (off_t)done);
+        if (n <= 0) return nil;
+        done += (size_t)n;
+    }
+    return buffer;
+}
+
+static BOOL bq_write_data(NSString *path, NSData *data, NSString **err) {
+    NSData *original = [NSData dataWithContentsOfFile:path];
+    if (bq_ultra26_build() && [path isEqualToString:BQMobileGestaltPath()]) {
+        if (!bq_valid_gestalt_data(original) || data.length != original.length) {
+            BQLog(@"ULTRA26 safe-write denied: source missing/invalid or serialized size changed (%lu -> %lu); no write",
+                  (unsigned long)original.length, (unsigned long)data.length);
+            if (err) *err = @"Protected MG cache size mismatch; no system file was written.";
+            return NO;
+        }
+        int fd = open(path.fileSystemRepresentation, O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) {
+            BQLog(@"ULTRA26 safe-write denied on open: errno=%d", errno);
+            if (err) *err = @"watchOS denied writable MobileGestalt access; no system file was written.";
+            return NO;
+        }
+        struct stat st;
+        BOOL ready = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                     st.st_size == (off_t)original.length &&
+                     [bq_read_exact(fd, original.length) isEqualToData:original];
+        if (!ready) {
+            close(fd);
+            if (err) *err = @"MobileGestalt changed before write; operation refused.";
+            return NO;
+        }
+
+        BOOL ok = bq_write_exact(fd, data.bytes, data.length) && fsync(fd) == 0;
+        if (ok) ok = [bq_read_exact(fd, data.length) isEqualToData:data];
+        if (!ok) {
+            BQLog(@"ULTRA26 protected write/readback failed; attempting original content rollback");
+            BOOL recovered = bq_write_exact(fd, original.bytes, original.length) &&
+                             fsync(fd) == 0 &&
+                             [bq_read_exact(fd, original.length) isEqualToData:original];
+            BQLog(@"ULTRA26 rollback confirmed=%d", recovered);
+            if (err) *err = recovered
+                ? @"Protected write failed; original cache restored."
+                : @"CRITICAL: protected write failed and original cache restoration was not verified.";
+        }
+        close(fd);
+        if (ok) BQLog(@"ULTRA26 protected same-length write + readback verified (%lu bytes)",
+                      (unsigned long)data.length);
+        return ok;
+    }
+    if (BQInPlaceWrite()) {""",
+"replace watchOS 26 truncate/rename write with guarded same-length pwrite and rollback")
 
 print("V2 READY: direct activation read, exact-file candidate, preflight, negative cache.")
