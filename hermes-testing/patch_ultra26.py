@@ -148,7 +148,7 @@ extension WatchConnectivityManager {
             print("[WC] Cannot transfer Watch diagnostic log: session not activated")
             return false
         }
-        BQLog(@"Watch diagnostic log export requested")
+        print("[WC] Watch diagnostic log export requested")
         let sourceURL = URL(fileURLWithPath: BQLogPath())
         guard FileManager.default.fileExists(atPath: sourceURL.path) else {
             print("[WC] Watch diagnostic log not found")
