@@ -1,3 +1,5 @@
+use plist::{Dictionary, Value};
+
 #[derive(Debug, Clone)]
 pub enum DeveloperDeviceType {
     Any,
@@ -12,8 +14,15 @@ impl DeveloperDeviceType {
             DeveloperDeviceType::Any => "",
             DeveloperDeviceType::Ios => "ios/",
             DeveloperDeviceType::Tvos => "tvos/",
-            DeveloperDeviceType::Watchos => "watchos/",
+            // Apple routes watchOS registration through ios/ with DTDK_Platform.
+            DeveloperDeviceType::Watchos => "ios/",
         }
+    }
+}
+
+pub fn apply_platform_to_body(body: &mut Dictionary, device_type: &Option<DeveloperDeviceType>) {
+    if matches!(device_type, Some(DeveloperDeviceType::Watchos)) {
+        body.insert("DTDK_Platform".into(), Value::String("watchos".into()));
     }
 }
 
@@ -32,4 +41,17 @@ pub fn dev_url(endpoint: &str, device_type: impl Into<Option<DeveloperDeviceType
 /// `DeveloperSession::send_services_request` talks to.
 pub fn services_url(path: &str) -> String {
     format!("https://developerservices2.apple.com/services/v1/{path}")
+}
+
+#[cfg(test)]
+mod watch_platform_tests {
+    use super::*;
+    #[test]
+    fn watch_api_uses_ios_endpoint_and_platform_marker() {
+        let url = dev_url("listDevices", Some(DeveloperDeviceType::Watchos));
+        assert!(url.contains("/ios/listDevices.action"));
+        let mut body = Dictionary::new();
+        apply_platform_to_body(&mut body, &Some(DeveloperDeviceType::Watchos));
+        assert_eq!(body.get("DTDK_Platform").and_then(Value::as_string), Some("watchos"));
+    }
 }
