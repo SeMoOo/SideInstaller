@@ -189,6 +189,7 @@ impl Bundle {
             ("Frameworks", None),
             ("PlugIns", None),
             ("Extensions", Some("appex")),
+            ("Watch", Some("app")), // embedded watchOS apps must be signed before iOS parent
         ];
         for (folder, extension) in folders {
             let dir = self.path.join(folder);
@@ -438,7 +439,7 @@ fn should_hash_resource(relative: &str, executable: &str) -> bool {
         return false;
     }
 
-    for nested_root in ["Frameworks/", "PlugIns/"] {
+    for nested_root in ["Frameworks/", "PlugIns/", "Watch/"] {
         if let Some(rest) = relative.strip_prefix(nested_root)
             && rest.contains('/')
         {
