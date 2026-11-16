@@ -4,6 +4,13 @@ All notable changes to SideInstaller are documented here.
 
 ## 2.0.2
 
+### Watch App Group signing update (build 203, draft test)
+- Assign App Groups to eligible watchOS app and extension App IDs, not only the iPhone host.
+- Send platform-specific requests for Watch App Groups and enforce the expected group entitlement in every Watch provisioning profile before signing.
+- Retain the same bundle IDs as the v2.0.1 released SideInstaller app.
+- Keep the earlier functional build 202 IPA available as a fallback.
+
+
 ### Fixed
 - **Apple Watch companion app installation (work in progress).** The sideloader now identifies embedded watchOS apps, aligns their bundle identifiers with the signed iPhone app, and prepares separate Watch provisioning and signing support. Final device validation is pending.
 
