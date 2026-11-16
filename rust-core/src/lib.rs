@@ -207,6 +207,7 @@ pub unsafe extern "C" fn si_sign_ipa(
     ipa_path: *const c_char,
     udid: *const c_char,
     device_name: *const c_char,
+    watch_udid: *const c_char,
     pairing_file_path: *const c_char,
     memory_limit: i32,
     app_group: i32,
@@ -218,6 +219,7 @@ pub unsafe extern "C" fn si_sign_ipa(
         ipa_path,
         udid,
         device_name,
+        watch_udid,
         pairing_file_path,
         match memory_limit {
             1 => MemoryLimit::Required,
