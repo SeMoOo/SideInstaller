@@ -5,6 +5,8 @@ use plist::Dictionary;
 use rootcause::prelude::*;
 use tracing::info;
 
+use std::collections::HashMap;
+
 use crate::{
     dev::{app_ids::Profile, teams::DeveloperTeam},
     sideload::{
@@ -31,6 +33,7 @@ pub fn sign(
     provisioning_profile: &Profile,
     special: &Option<SpecialApp>,
     team: &DeveloperTeam,
+    watch_profiles: &HashMap<String, Profile>,
 ) -> Result<(), Report> {
     let profile_der: &[u8] = provisioning_profile.encoded_profile.as_ref();
     let profile =
@@ -57,6 +60,23 @@ pub fn sign(
         settings
             .entitlements_by_bundle_id
             .insert(bundle_id, entitlements.clone());
+    }
+
+    // Unlike iOS .appex bundles, Watch app/extension IDs have their own
+    // watchOS provisioning profiles. Sign the embedded Watch bundles with
+    // those exact entitlements rather than inheriting the iPhone profile.
+    // The codesign engine traverses Watch/ and signs nested bundles first.
+    let parsed_watch_profiles: Result<Vec<_>, _> = watch_profiles.iter().map(|(id, profile)| {
+        let der: &[u8] = profile.encoded_profile.as_ref();
+        let parsed = ProvisioningProfile::parse(der)
+            .context(format!("Failed to parse watchOS profile for {id}"))?;
+        Ok::<_, Report>((id.clone(), parsed.entitlements().clone()))
+    }).collect();
+    for (id, watch_entitlements) in parsed_watch_profiles? {
+        let der: &[u8] = watch_profiles.get(&id)
+            .expect("profile key from parsed_watch_profiles").encoded_profile.as_ref();
+        settings.embedded_mobileprovisions_by_bundle_id.insert(id.clone(), der);
+        settings.entitlements_by_bundle_id.insert(id, watch_entitlements);
     }
 
     info!(
