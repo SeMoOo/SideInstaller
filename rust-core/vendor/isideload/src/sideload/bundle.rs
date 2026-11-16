@@ -193,6 +193,24 @@ impl Bundle {
                 Value::String(new_parent.into()),
             );
             rebase_child(watch, old_parent, new_parent)?;
+
+            // Resolve the WatchKit extension reference from its actual owning
+            // Watch bundle, not from the original app's name or a fixed ID.
+            // This also repairs a stale WKAppBundleIdentifier in an IPA that
+            // has previously been re-signed.
+            let watch_id = watch.bundle_identifier()
+                .ok_or_else(|| report!("Watch app missing CFBundleIdentifier"))?
+                .to_string();
+            for extension in watch.app_extensions_mut() {
+                if let Some(reference) = extension.app_info.get_mut("NSExtension")
+                    .and_then(Value::as_dictionary_mut)
+                    .and_then(|extension| extension.get_mut("NSExtensionAttributes"))
+                    .and_then(Value::as_dictionary_mut)
+                    .and_then(|attributes| attributes.get_mut("WKAppBundleIdentifier"))
+                {
+                    *reference = Value::String(watch_id.clone());
+                }
+            }
         }
         Ok(())
     }
@@ -540,60 +558,120 @@ pub(crate) mod tests {
     }
 
 
-    #[test]
-    fn watch_companion_rebase_follows_iphone_bundle_id() {
+    /// Exercise arbitrary iPhone/Watch combinations instead of relying on a
+    /// single developer's bundle ID, device or signing-team identifier.
+    fn assert_watch_companion_rebase(
+        original_id: &str,
+        team_id: &str,
+        extension_suffix: &str,
+        stale_extension_link: bool,
+    ) {
         let dir = TempDir::new();
-        let app_dir = dir.0.join("HermesCompanion.app");
-        write_bundle(&app_dir, "com.soooma.HermesEnabler");
-        let watch_dir = app_dir.join("Watch/HermesEnabler2.app");
-        write_bundle(&watch_dir, "com.soooma.HermesEnabler.watchkitapp");
-        let mut info: Dictionary = plist::from_file(watch_dir.join("Info.plist")).unwrap();
-        info.insert("WKCompanionAppBundleIdentifier".into(), "com.soooma.HermesEnabler".into());
-        plist::to_file_xml(watch_dir.join("Info.plist"), &info).unwrap();
-        let watch_extension = watch_dir.join("PlugIns/WatchExtension.appex");
-        write_bundle(
-            &watch_extension,
-            "com.soooma.HermesEnabler.watchkitapp.watchkitextension",
+        let app_dir = dir.0.join("PhoneApplication.app");
+        let watch_dir = app_dir.join("Watch/Companion.app");
+        let watch_extension = watch_dir.join("PlugIns/CompanionExtension.appex");
+        let watch_original = format!("{original_id}.watchkitapp");
+        let watch_extension_original = format!("{original_id}{extension_suffix}");
+        let signed_id = format!("{original_id}.{team_id}");
+        let watch_signed = format!("{signed_id}.watchkitapp");
+        let extension_signed = format!("{signed_id}{extension_suffix}");
+
+        write_bundle(&app_dir, original_id);
+        write_bundle(&watch_dir, &watch_original);
+        let mut watch_info: Dictionary =
+            plist::from_file(watch_dir.join("Info.plist")).unwrap();
+        watch_info.insert(
+            "WKCompanionAppBundleIdentifier".into(),
+            Value::String(original_id.into()),
         );
-        let mut ext_info: Dictionary = plist::from_file(watch_extension.join("Info.plist")).unwrap();
+        plist::to_file_xml(watch_dir.join("Info.plist"), &watch_info).unwrap();
+
+        write_bundle(&watch_extension, &watch_extension_original);
+        let mut extension_info: Dictionary =
+            plist::from_file(watch_extension.join("Info.plist")).unwrap();
         let mut attributes = Dictionary::new();
-        attributes.insert("WKAppBundleIdentifier".into(),
-            "com.soooma.HermesEnabler.watchkitapp".into());
+        attributes.insert(
+            "WKAppBundleIdentifier".into(),
+            Value::String(if stale_extension_link {
+                "org.invalid.previous.watch".into()
+            } else {
+                watch_original.clone()
+            }),
+        );
         let mut extension = Dictionary::new();
         extension.insert("NSExtensionAttributes".into(), Value::Dictionary(attributes));
-        ext_info.insert("NSExtension".into(), Value::Dictionary(extension));
-        plist::to_file_xml(watch_extension.join("Info.plist"), &ext_info).unwrap();
+        extension_info.insert("NSExtension".into(), Value::Dictionary(extension));
+        plist::to_file_xml(watch_extension.join("Info.plist"), &extension_info).unwrap();
 
         let mut root = Bundle::new(app_dir).unwrap();
         assert_eq!(root.watch_provisionable_bundles().len(), 2);
-        root.rebase_embedded_identifiers(
-            "com.soooma.HermesEnabler",
-            "com.soooma.HermesEnabler.8N8S3H2FFR",
-        ).unwrap();
-        root.set_bundle_identifier("com.soooma.HermesEnabler.8N8S3H2FFR");
+        root.rebase_embedded_identifiers(original_id, &signed_id).unwrap();
+        root.set_bundle_identifier(&signed_id);
+        // Re-running the rebase must not append the signing-team suffix twice.
+        root.rebase_embedded_identifiers(original_id, &signed_id).unwrap();
         root.write_info_recursive().unwrap();
+
         let watch = &root.watch_apps()[0];
-        assert_eq!(watch.bundle_identifier(), Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp"));
+        assert_eq!(root.bundle_identifier(), Some(signed_id.as_str()));
+        assert_eq!(watch.bundle_identifier(), Some(watch_signed.as_str()));
         assert_eq!(
             watch.app_info.get("WKCompanionAppBundleIdentifier").and_then(Value::as_string),
-            Some("com.soooma.HermesEnabler.8N8S3H2FFR")
+            Some(signed_id.as_str())
         );
+        let watch_extension = &watch.app_extensions()[0];
+        assert_eq!(watch_extension.bundle_identifier(), Some(extension_signed.as_str()));
+        let extension_reference = watch_extension.app_info.get("NSExtension")
+            .and_then(Value::as_dictionary).unwrap()
+            .get("NSExtensionAttributes").and_then(Value::as_dictionary).unwrap()
+            .get("WKAppBundleIdentifier").and_then(Value::as_string);
+        assert_eq!(extension_reference, Some(watch_signed.as_str()));
+
+        let watch_disk: Dictionary = plist::from_file(watch.bundle_dir.join("Info.plist")).unwrap();
         assert_eq!(
-            watch.app_extensions()[0].bundle_identifier(),
-            Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp.watchkitextension")
+            watch_disk.get("WKCompanionAppBundleIdentifier").and_then(Value::as_string),
+            Some(signed_id.as_str())
         );
-        let ext_attrs = watch.app_extensions()[0].app_info.get("NSExtension")
-            .and_then(Value::as_dictionary).unwrap().get("NSExtensionAttributes")
-            .and_then(Value::as_dictionary).unwrap();
+        let extension_disk: Dictionary =
+            plist::from_file(watch_extension.bundle_dir.join("Info.plist")).unwrap();
         assert_eq!(
-            ext_attrs.get("WKAppBundleIdentifier").and_then(Value::as_string),
-            Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp")
+            extension_disk.get("NSExtension").and_then(Value::as_dictionary).unwrap()
+                .get("NSExtensionAttributes").and_then(Value::as_dictionary).unwrap()
+                .get("WKAppBundleIdentifier").and_then(Value::as_string),
+            Some(watch_signed.as_str())
         );
-        let on_disk: Dictionary = plist::from_file(watch.bundle_dir.join("Info.plist")).unwrap();
-        assert_eq!(
-            on_disk.get("WKCompanionAppBundleIdentifier").and_then(Value::as_string),
-            Some("com.soooma.HermesEnabler.8N8S3H2FFR")
+    }
+
+    #[test]
+    fn watch_companion_bundle_ids_follow_each_imported_app() {
+        // Alternate team IDs, app names and WatchKit extension identifier
+        // layouts, including a stale extension reference from a prior signer.
+        assert_watch_companion_rebase(
+            "com.acme.WorkoutTracker", "TEAMALPHA1",
+            ".watchkitapp.watchkitextension", false,
         );
+        assert_watch_companion_rebase(
+            "net.studio.TaskTimer", "DEVTEAM567",
+            ".watchkitextension", true,
+        );
+        assert_watch_companion_rebase(
+            "org.sample.PrayerTime", "ANOTHER99",
+            ".watchkitapp.watchkitextension", false,
+        );
+    }
+
+    #[test]
+    fn iphone_only_apps_do_not_gain_watch_metadata() {
+        let dir = TempDir::new();
+        let app_dir = dir.0.join("Simple.app");
+        write_bundle(&app_dir, "com.company.NoWatch");
+        let mut root = Bundle::new(app_dir).unwrap();
+        root.rebase_embedded_identifiers(
+            "com.company.NoWatch", "com.company.NoWatch.TEAMID"
+        ).unwrap();
+        root.set_bundle_identifier("com.company.NoWatch.TEAMID");
+        assert!(root.watch_apps().is_empty());
+        assert!(root.watch_provisionable_bundles().is_empty());
+        assert!(!root.app_info.contains_key("WKCompanionAppBundleIdentifier"));
     }
 
     #[test]
