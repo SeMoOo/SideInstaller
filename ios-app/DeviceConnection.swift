@@ -699,6 +699,36 @@ final class DeviceConnection {
         }
     }
 
+    // MARK: Apple Watch companion discovery
+
+    /// Obtain the paired Watch UDID through Apple's companion_proxy service
+    /// over the same RSD tunnel used for the iPhone. Unlike the iPhone UDID,
+    /// this ID is required for watchOS provisioning profiles.
+    func pairedWatchUDID() throws -> String? {
+        guard let adapter, let handshake else { throw fail("not connected") }
+        var client: OpaquePointer?
+        try check(companion_proxy_connect_rsd(adapter, handshake, &client),
+                  "companion_proxy_connect_rsd failed")
+        guard let client else { throw fail("companion proxy client was null") }
+        defer { companion_proxy_client_free(client) }
+
+        var ids: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var count: UInt = 0
+        try check(companion_proxy_get_device_registry(client, &ids, &count),
+                  "companion_proxy_get_device_registry failed")
+        guard let ids else { return nil }
+        defer {
+            for i in 0..<Int(count) {
+                if let value = ids[i] { idevice_string_free(value) }
+            }
+            idevice_outer_slice_free(ids, count)
+        }
+        return (0..<Int(count)).compactMap { i -> String? in
+            guard let value = ids[i] else { return nil }
+            return String(validatingUTF8: value)
+        }.first
+    }
+
     // MARK: Classic lockdown pair record
 
     /// A classic lockdown pair record, and how enabling wireless lockdown went.
