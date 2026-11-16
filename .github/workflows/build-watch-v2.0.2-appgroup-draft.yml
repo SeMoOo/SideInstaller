@@ -40,6 +40,14 @@ jobs:
           grep -q 'DeveloperDeviceType::Watchos' rust-core/vendor/isideload/src/sideload/sideloader.rs
           grep -q 'app_id.ensure_group_feature(&mut session, team, platform.clone())' rust-core/vendor/isideload/src/sideload/sideloader.rs
           grep -q 'verify_app_group_in_profile(parsed.entitlements(), group)' rust-core/vendor/isideload/src/sideload/sign.rs
+          # Catch async-trait regressions before expensive Xcode compilation.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path("rust-core/vendor/isideload/src/dev/app_ids.rs").read_text()
+          assert re.search(r'pub async fn ensure_group_feature\([\s\S]*?device_type: impl Into<Option<DeveloperDeviceType>> \+ Send,', text), "Watch App Group async Send bound missing"
+          print("watchOS App Group async API signature checked")
+          PY
           grep -q 'apply_platform_to_body(&mut body, &device_type)' rust-core/vendor/isideload/src/dev/app_groups.rs
           # Prevent regression: both Swift signing screens must use the ten-argument FFI.
           grep -Fq 'si_sign_ipa(session, ipa, udid, deviceName, nil, nil, 0, 1, &signed, &error)' ios-app/SideBySideView.swift
