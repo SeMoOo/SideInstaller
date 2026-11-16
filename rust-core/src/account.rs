@@ -328,6 +328,7 @@ pub unsafe fn sign_ipa(
     ipa_path: *const c_char,
     udid: *const c_char,
     device_name: *const c_char,
+    watch_udid: *const c_char,
     pairing_file_path: *const c_char,
     memory_limit: MemoryLimit,
     app_group: bool,
@@ -342,6 +343,7 @@ pub unsafe fn sign_ipa(
     let ipa_path = opt(ipa_path, "");
     let udid = opt(udid, "");
     let device_name = opt(device_name, "");
+    let watch_udid = opt(watch_udid, "");
     let pairing_file = altstore_pairing_file(&opt(pairing_file_path, ""));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -364,6 +366,8 @@ pub unsafe fn sign_ipa(
                 Some((name, udid.as_str()))
             };
 
+            let watch_device = (!watch_udid.is_empty())
+                .then_some(("Apple Watch", watch_udid.as_str()));
             tracing::info!("Signing IPA at {ipa_path}");
             let (signed, _special) = session
                 .sideloader
@@ -373,6 +377,7 @@ pub unsafe fn sign_ipa(
                     memory_limit,
                     app_group,
                     device,
+                    watch_device,
                     pairing_file.as_deref(),
                 )
                 .await
