@@ -1,7 +1,7 @@
 use apple_codesign_quick::{
     BundleSigningSettings, ProvisioningProfile, RustCryptoCmsSigner, sign_bundle,
 };
-use plist::Dictionary;
+use plist::{Dictionary, Value};
 use rootcause::prelude::*;
 use tracing::info;
 
@@ -34,6 +34,7 @@ pub fn sign(
     special: &Option<SpecialApp>,
     team: &DeveloperTeam,
     watch_profiles: &HashMap<String, Profile>,
+    watch_group_required: Option<&str>,
 ) -> Result<(), Report> {
     let profile_der: &[u8] = provisioning_profile.encoded_profile.as_ref();
     let profile =
@@ -70,6 +71,10 @@ pub fn sign(
         let der: &[u8] = profile.encoded_profile.as_ref();
         let parsed = ProvisioningProfile::parse(der)
             .context(format!("Failed to parse watchOS profile for {id}"))?;
+        if let Some(group) = watch_group_required {
+            verify_app_group_in_profile(parsed.entitlements(), group)
+                .context(format!("Watch provisioning profile for {id} is missing its App Group"))?;
+        }
         Ok::<_, Report>((id.clone(), parsed.entitlements().clone()))
     }).collect();
     for (id, watch_entitlements) in parsed_watch_profiles? {
@@ -93,6 +98,19 @@ pub fn sign(
         app.bundle.bundle_dir.display()
     ))?;
 
+    Ok(())
+}
+
+/// Verify watchOS App Group entitlements before producing a bundle that can
+/// install yet fail when attempting to access its shared container.
+fn verify_app_group_in_profile(entitlements: &Dictionary, required_group: &str) -> Result<(), Report> {
+    let granted = entitlements
+        .get("com.apple.security.application-groups")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.as_string() == Some(required_group)));
+    if !granted {
+        bail!("App Group {required_group} is not granted by the watchOS provisioning profile");
+    }
     Ok(())
 }
 
@@ -165,6 +183,20 @@ fn entitlements(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_app_group_profile_must_match_requested_group() {
+        let wanted = "group.com.company.App.TEAMID";
+        let mut entitlements = Dictionary::new();
+        assert!(verify_app_group_in_profile(&entitlements, wanted).is_err());
+        entitlements.insert("com.apple.security.application-groups".into(),
+            Value::Array(vec![Value::String("group.net.other.App".into())]));
+        assert!(verify_app_group_in_profile(&entitlements, wanted).is_err());
+        entitlements.insert("com.apple.security.application-groups".into(),
+            Value::Array(vec![Value::String(wanted.into())]));
+        assert!(verify_app_group_in_profile(&entitlements, wanted).is_ok());
+    }
+
     use crate::sideload::bundle::tests::{TempDir, write_app_with_both_extension_kinds};
 
     /// Both kinds of extension get the main profile and entitlements under
