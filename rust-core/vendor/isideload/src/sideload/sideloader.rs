@@ -145,6 +145,7 @@ impl Sideloader {
             .await
             .context("Failed to get anisette headers")?;
         let mut device_session = self.dev_session.clone();
+        let mut watch_device_session = self.dev_session.clone();
         let mut cert_session = self.dev_session.clone();
         let mut app_id_session = self.dev_session.clone();
         let mut group_session = self.dev_session.clone();
@@ -157,13 +158,7 @@ impl Sideloader {
             {
                 bail!("device registration failed for UDID {udid}: {e}");
             }
-            if let Some((name, udid)) = register_watch {
-                device_session
-                    .ensure_device_registered(&team, name, udid, Some(DeveloperDeviceType::Watchos))
-                    .await
-                    .context(format!("watchOS device registration failed for UDID {udid}"))?;
-            }
-            Ok::<(), Report>(())
+             Ok::<(), Report>(())
         };
 
         let certificate = async {
@@ -201,8 +196,14 @@ impl Sideloader {
             let main_app_id_str = format!("{}.{}", main_bundle_id, team.team_id);
             app.update_bundle_id(&main_bundle_id, &main_app_id_str)?;
             let watch_bundle_ids = app.watch_bundle_ids();
-            if !watch_bundle_ids.is_empty() && register_watch.is_none() {
-                bail!("The IPA contains an Apple Watch app, but no paired Watch UDID was found. Keep the Watch unlocked and connected to this iPhone, then retry.");
+            if !watch_bundle_ids.is_empty() {
+                let (name, udid) = register_watch.ok_or_else(|| report!(
+                    "The IPA contains an Apple Watch app, but no paired Watch UDID was found. Keep the Watch unlocked and connected to this iPhone, then retry."
+                ))?;
+                watch_device_session
+                    .ensure_device_registered(&team, name, udid, Some(DeveloperDeviceType::Watchos))
+                    .await
+                    .context(format!("watchOS device registration failed for UDID {udid}"))?;
             }
 
             let group_identifier = format!(
