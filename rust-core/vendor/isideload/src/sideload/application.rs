@@ -4,6 +4,7 @@
 use crate::SideloadError;
 use crate::dev::app_ids::{AppId, AppIdsApi};
 use crate::dev::developer_session::DeveloperSession;
+use crate::dev::device_type::DeveloperDeviceType;
 use crate::dev::teams::DeveloperTeam;
 use crate::sideload::bundle::Bundle;
 use crate::sideload::cert_identity::CertificateIdentity;
@@ -145,27 +146,21 @@ impl Application {
         main_app_bundle_id: &str,
         main_app_id_str: &str,
     ) -> Result<(), Report> {
-        let extensions = self.bundle.app_extensions_mut();
-        for ext in extensions.iter_mut() {
-            if let Some(id) = ext.bundle_identifier() {
-                if !(id.starts_with(main_app_bundle_id) && id.len() > main_app_bundle_id.len()) {
-                    bail!(SideloadError::InvalidBundle(format!(
-                        "Extension {} is not part of the main app bundle identifier: {}",
-                        ext.bundle_name().unwrap_or("Unknown"),
-                        id
-                    )));
-                } else {
-                    ext.set_bundle_identifier(&format!(
-                        "{}{}",
-                        main_app_id_str,
-                        &id[main_app_bundle_id.len()..]
-                    ));
-                }
-            }
-        }
+        self.bundle.rebase_embedded_identifiers(main_app_bundle_id, main_app_id_str)?;
         self.bundle.set_bundle_identifier(main_app_id_str);
 
         Ok(())
+    }
+
+    /// The Watch app and any WatchKit extensions need watchOS App IDs and
+    /// their own provisioning profiles; iPhone extensions retain the existing
+    /// profile-reuse behavior.
+    pub fn watch_bundle_ids(&self) -> Vec<String> {
+        self.bundle
+            .watch_provisionable_bundles()
+            .iter()
+            .filter_map(|b| b.bundle_identifier().map(str::to_string))
+            .collect()
     }
 
     /// Registers the main app's App ID if the team doesn't have it yet. App
@@ -226,7 +221,7 @@ impl Application {
             }
             dev_session.list_app_ids(team, None).await?.app_ids
         };
-        let app_ids: Vec<_> = listed
+        let mut app_ids: Vec<_> = listed
             .into_iter()
             .filter(|app_id| {
                 bundles_with_app_id
@@ -235,7 +230,43 @@ impl Application {
             })
             .collect();
 
-        info!("Registered app IDs");
+        let watch_bundles = self.bundle.watch_provisionable_bundles();
+        if !watch_bundles.is_empty() {
+            let listed = dev_session.list_app_ids(team, Some(DeveloperDeviceType::Watchos)).await
+                .context("Failed to list watchOS app IDs")?;
+            let missing: Vec<_> = watch_bundles.iter().filter(|bundle| {
+                let id = bundle.bundle_identifier().unwrap_or("");
+                !listed.app_ids.iter().any(|app_id| app_id.identifier == id)
+            }).collect();
+            if let Some(available) = listed.available_quantity
+                && let Ok(available) = usize::try_from(available)
+                && missing.len() > available
+            {
+                bail!("Not enough available Watch app IDs: {} required, {} available",
+                    missing.len(), available);
+            }
+            for bundle in &missing {
+                let id = bundle.bundle_identifier().ok_or_else(|| report!("Watch bundle missing ID"))?;
+                dev_session.add_app_id(team, bundle.bundle_name().unwrap_or("Watch companion"),
+                    id, Some(DeveloperDeviceType::Watchos)).await
+                    .context(format!("Failed to register watchOS App ID {id}"))?;
+            }
+            let registered = if missing.is_empty() {
+                listed.app_ids
+            } else {
+                dev_session.list_app_ids(team, Some(DeveloperDeviceType::Watchos)).await?.app_ids
+            };
+            let watch_ids: Vec<_> = registered.into_iter().filter(|app_id| {
+                watch_bundles.iter().any(|bundle| bundle.bundle_identifier() == Some(app_id.identifier.as_str()))
+            }).collect();
+            if watch_ids.len() != watch_bundles.len() {
+                bail!("Not all Watch app IDs were registered (found {}, expected {})",
+                    watch_ids.len(), watch_bundles.len());
+            }
+            app_ids.extend(watch_ids);
+        }
+
+        info!("Registered app IDs including {} watchOS bundle(s)", watch_bundles.len());
         Ok(app_ids)
     }
 
