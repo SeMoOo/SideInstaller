@@ -3,6 +3,7 @@ use crate::{
         app_groups::AppGroupsApi,
         app_ids::AppIdsApi,
         developer_session::DeveloperSession,
+        device_type::DeveloperDeviceType,
         devices::DevicesApi,
         teams::{DeveloperTeam, TeamsApi},
     },
@@ -18,7 +19,7 @@ use crate::{
 #[cfg(feature = "install")]
 use crate::util::device::IdeviceInfo;
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use futures_util::future::{try_join, try_join3, try_join_all};
 #[cfg(feature = "install")]
@@ -128,6 +129,7 @@ impl Sideloader {
         memory_limit: MemoryLimit,
         app_group: bool,
         register_device: Option<(&str, &str)>,
+        register_watch: Option<(&str, &str)>,
         pairing_file: Option<&[u8]>,
     ) -> Result<(PathBuf, Option<SpecialApp>), Report> {
         let team = match team {
@@ -154,6 +156,12 @@ impl Sideloader {
                     .await
             {
                 bail!("device registration failed for UDID {udid}: {e}");
+            }
+            if let Some((name, udid)) = register_watch {
+                device_session
+                    .ensure_device_registered(&team, name, udid, Some(DeveloperDeviceType::Watchos))
+                    .await
+                    .context(format!("watchOS device registration failed for UDID {udid}"))?;
             }
             Ok::<(), Report>(())
         };
@@ -192,6 +200,10 @@ impl Sideloader {
             let main_app_name = app.main_app_name()?;
             let main_app_id_str = format!("{}.{}", main_bundle_id, team.team_id);
             app.update_bundle_id(&main_bundle_id, &main_app_id_str)?;
+            let watch_bundle_ids = app.watch_bundle_ids();
+            if !watch_bundle_ids.is_empty() && register_watch.is_none() {
+                bail!("The IPA contains an Apple Watch app, but no paired Watch UDID was found. Keep the Watch unlocked and connected to this iPhone, then retry.");
+            }
 
             let group_identifier = format!(
                 "group.{}",
@@ -227,18 +239,23 @@ impl Sideloader {
                     )
                 })?;
 
-            // Each App ID is configured on its own session, all at once.
+            // Watch App IDs need watchOS profiles. Their capabilities are
+            // configured separately from the iPhone's memory-limit feature.
+            let watch_app_ids: Vec<_> = app_ids.iter()
+                .filter(|id| watch_bundle_ids.contains(&id.identifier))
+                .cloned().collect();
             try_join_all(app_ids.iter_mut().map(|app_id| {
                 let mut session = app_id_session.clone();
                 let (team, app_group) = (&team, &app_group);
+                let is_watch = watch_bundle_ids.contains(&app_id.identifier);
                 async move {
-                    if let Some(app_group) = app_group {
+                    if !is_watch && let Some(app_group) = app_group {
                         app_id.ensure_group_feature(&mut session, team).await?;
                         session
                             .assign_app_group(team, app_group, app_id, None)
                             .await?;
                     }
-                    if memory_limit != MemoryLimit::Off {
+                    if !is_watch && memory_limit != MemoryLimit::Off {
                         match session.add_increased_memory_limit(team, app_id).await {
                             Ok(()) => {
                                 info!("Increased Memory Limit enabled for {}", app_id.identifier)
@@ -256,16 +273,16 @@ impl Sideloader {
             .await?;
 
             info!("App IDs configured");
-            Ok::<_, Report>((app, special, group_identifier, main_app_id))
+            Ok::<_, Report>((app, special, group_identifier, main_app_id, watch_app_ids))
         };
 
-        let ((), cert_identity, (mut app, special, group_identifier, main_app_id)) =
+        let ((), cert_identity, (mut app, special, group_identifier, main_app_id, watch_app_ids)) =
             try_join3(registration, certificate, bundle).await?;
 
         // The profile has to come after the device and App IDs are set up; the
         // certificate goes into the bundle meanwhile.
         let dev_session = &mut self.dev_session;
-        let ((), provisioning_profile) = try_join(
+        let ((), (provisioning_profile, watch_profiles)) = try_join(
             async {
                 app.apply_special_app_behavior(
                     &special,
@@ -282,19 +299,23 @@ impl Sideloader {
                 let profile = dev_session
                     .download_team_provisioning_profile(&team, &main_app_id, None)
                     .await?;
-                info!("Acquired provisioning profile");
-                Ok::<_, Report>(profile)
+                let mut watch_profiles: HashMap<String, crate::dev::app_ids::Profile> = HashMap::new();
+                for watch_id in &watch_app_ids {
+                    let watch_profile = dev_session
+                        .download_team_provisioning_profile(
+                            &team, watch_id, Some(DeveloperDeviceType::Watchos)
+                        )
+                        .await
+                        .context(format!("Failed to provision watchOS bundle {}", watch_id.identifier))?;
+                    watch_profiles.insert(watch_id.identifier.clone(), watch_profile);
+                }
+                info!("Acquired iPhone and {} watchOS provisioning profile(s)", watch_profiles.len());
+                Ok::<_, Report>((profile, watch_profiles))
             },
         )
         .await?;
 
-        app.bundle.write_info()?;
-        for ext in app.bundle.app_extensions_mut() {
-            ext.write_info()?;
-        }
-        for ext in app.bundle.frameworks_mut() {
-            ext.write_info()?;
-        }
+        app.bundle.write_info_recursive()?;
 
         // `sign` writes embedded.mobileprovision into the app and each .appex
         // as it signs them, since the profile is sealed into CodeResources.
@@ -306,6 +327,7 @@ impl Sideloader {
             &provisioning_profile,
             &special,
             &team,
+            &watch_profiles,
         )
         .context("Failed to sign app")?;
 
@@ -334,6 +356,7 @@ impl Sideloader {
                 memory_limit,
                 true,
                 Some((&device_info.name, &device_info.udid)),
+                None, // This library's install_app does not discover paired Watch devices.
                 pairing_file,
             )
             .await?;
