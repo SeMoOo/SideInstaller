@@ -229,7 +229,7 @@ impl AppId {
         &mut self,
         dev_session: &mut DeveloperSession,
         team: &DeveloperTeam,
-        device_type: impl Into<Option<DeveloperDeviceType>>,
+        device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<(), Report> {
         let app_group_feature_enabled = self.features.get_bool("APG3427HIY")?;
 
