@@ -2,6 +2,11 @@
 
 All notable changes to SideInstaller are documented here.
 
+## 2.0.2
+
+### Fixed
+- **Apple Watch companion app installation (work in progress).** The sideloader now identifies embedded watchOS apps, aligns their bundle identifiers with the signed iPhone app, and prepares separate Watch provisioning and signing support. Final device validation is pending.
+
 ## 2.0.1
 
 ### Changed
