@@ -161,6 +161,18 @@ impl Bundle {
         old_parent: &str,
         new_parent: &str,
     ) -> Result<(), Report> {
+        // A WatchKit extension's NSExtensionAttributes points to its containing
+        // Watch .app by WKAppBundleIdentifier. Rebase that link as well.
+        if let Some(attrs) = self.app_info.get_mut("NSExtension")
+            .and_then(Value::as_dictionary_mut)
+            .and_then(|extension| extension.get_mut("NSExtensionAttributes"))
+            .and_then(Value::as_dictionary_mut)
+            && let Some(reference) = attrs.get_mut("WKAppBundleIdentifier")
+            && let Some(old_id) = reference.as_string().map(str::to_string)
+            && let Some(new_id) = rebase_identifier(&old_id, old_parent, new_parent)
+        {
+            *reference = Value::String(new_id);
+        }
         for extension in &mut self.app_extensions {
             rebase_child(extension, old_parent, new_parent)?;
         }
@@ -538,10 +550,19 @@ pub(crate) mod tests {
         let mut info: Dictionary = plist::from_file(watch_dir.join("Info.plist")).unwrap();
         info.insert("WKCompanionAppBundleIdentifier".into(), "com.soooma.HermesEnabler".into());
         plist::to_file_xml(watch_dir.join("Info.plist"), &info).unwrap();
+        let watch_extension = watch_dir.join("PlugIns/WatchExtension.appex");
         write_bundle(
-            &watch_dir.join("PlugIns/WatchExtension.appex"),
+            &watch_extension,
             "com.soooma.HermesEnabler.watchkitapp.watchkitextension",
         );
+        let mut ext_info: Dictionary = plist::from_file(watch_extension.join("Info.plist")).unwrap();
+        let mut attributes = Dictionary::new();
+        attributes.insert("WKAppBundleIdentifier".into(),
+            "com.soooma.HermesEnabler.watchkitapp".into());
+        let mut extension = Dictionary::new();
+        extension.insert("NSExtensionAttributes".into(), Value::Dictionary(attributes));
+        ext_info.insert("NSExtension".into(), Value::Dictionary(extension));
+        plist::to_file_xml(watch_extension.join("Info.plist"), &ext_info).unwrap();
 
         let mut root = Bundle::new(app_dir).unwrap();
         assert_eq!(root.watch_provisionable_bundles().len(), 2);
@@ -560,6 +581,13 @@ pub(crate) mod tests {
         assert_eq!(
             watch.app_extensions()[0].bundle_identifier(),
             Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp.watchkitextension")
+        );
+        let ext_attrs = watch.app_extensions()[0].app_info.get("NSExtension")
+            .and_then(Value::as_dictionary).unwrap().get("NSExtensionAttributes")
+            .and_then(Value::as_dictionary).unwrap();
+        assert_eq!(
+            ext_attrs.get("WKAppBundleIdentifier").and_then(Value::as_string),
+            Some("com.soooma.HermesEnabler.8N8S3H2FFR.watchkitapp")
         );
         let on_disk: Dictionary = plist::from_file(watch.bundle_dir.join("Info.plist")).unwrap();
         assert_eq!(
