@@ -1,7 +1,7 @@
 use crate::dev::{
     app_ids::AppId,
     developer_session::DeveloperSession,
-    device_type::{DeveloperDeviceType, dev_url},
+    device_type::{DeveloperDeviceType, apply_platform_to_body, dev_url},
     normalize_app_names,
     teams::DeveloperTeam,
 };
@@ -27,9 +27,11 @@ pub trait AppGroupsApi {
         team: &DeveloperTeam,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<Vec<AppGroup>, Report> {
-        let body = plist!(dict {
+        let device_type = device_type.into();
+        let mut body = plist!(dict {
             "teamId": &team.team_id,
-        });
+        })
+        apply_platform_to_body(&mut body, &device_type);;
 
         let app_groups: Vec<AppGroup> = self
             .developer_session()
@@ -51,11 +53,13 @@ pub trait AppGroupsApi {
         identifier: &str,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<AppGroup, Report> {
-        let body = plist!(dict {
+        let device_type = device_type.into();
+        let mut body = plist!(dict {
             "teamId": &team.team_id,
             "name": normalize_app_names(name),
             "identifier": identifier,
-        });
+        })
+        apply_platform_to_body(&mut body, &device_type);;
 
         let app_group: AppGroup = self
             .developer_session()
@@ -77,11 +81,13 @@ pub trait AppGroupsApi {
         app_id: &AppId,
         device_type: impl Into<Option<DeveloperDeviceType>> + Send,
     ) -> Result<(), Report> {
-        let body = plist!(dict {
+        let device_type = device_type.into();
+        let mut body = plist!(dict {
             "teamId": &team.team_id,
             "applicationGroups": &app_group.application_group,
             "appIdId": &app_id.app_id_id,
-        });
+        })
+        apply_platform_to_body(&mut body, &device_type);;
 
         self.developer_session()
             .send_dev_request_no_response(
